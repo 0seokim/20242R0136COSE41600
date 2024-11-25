@@ -1,12 +1,10 @@
 # 시각화에 필요한 라이브러리 불러오기
 import open3d as o3d
 import numpy as np
-import pdb
 import matplotlib.pyplot as plt
 
 # pcd 파일 불러오기, 필요에 맞게 경로 수정
-# file_path = "test_data/1727320101-665925967.pcd"
-file_path = "test_data/1727320101-961578277.pcd"
+file_path = "test_data/1727320101-665925967.pcd"
 # PCD 파일 읽기
 original_pcd = o3d.io.read_point_cloud(file_path)
 
@@ -31,20 +29,15 @@ points = np.asarray(final_point.points)
 
 # DBSCAN 클러스터링 적용
 with o3d.utility.VerbosityContextManager(o3d.utility.VerbosityLevel.Debug) as cm:
-# 21085개의 포인터들을 각각 클러스터로 labeling
-    labels = np.array(final_point.cluster_dbscan(eps=0.4, min_points=10, print_progress=True))
+    labels = np.array(final_point.cluster_dbscan(eps=0.3, min_points=10, print_progress=True))
 
 # 각 클러스터를 색으로 표시
 max_label = labels.max()
-print(f"point cloud has {len(labels)} points")
 print(f"point cloud has {max_label + 1} clusters")
 
 # 노이즈를 제거하고 각 클러스터에 색상 지정
-colors = plt.get_cmap("tab20")(labels / (max_label + 1 if max_label > 0 else 1)) #ZeroDivisionError를 방지
-
+colors = plt.get_cmap("tab20")(labels / (max_label + 1 if max_label > 0 else 1))
 colors[labels < 0] = 0  # 노이즈는 검정색으로 표시
-print("num_noise points:",len(colors[labels<0]))
-print("num_inline points:",len(labels)-len(colors[labels<0]))
 final_point.colors = o3d.utility.Vector3dVector(colors[:, :3])
 
 # 필터링 기준 1. 클러스터 내 최대 최소 포인트 수
@@ -56,17 +49,22 @@ min_z_value = -1.5    # 클러스터 내 최소 Z값
 max_z_value = 2.5   # 클러스터 내 최대 Z값
 
 # 필터링 기준 3. 클러스터 내 최소 최대 Z값 차이
+min_height = 0.5   # Z값 차이의 최소값
+max_height = 2.0   # Z값 차이의 최대값
 
-## min_height 0.5 -> 0.8 : 물체의 높이가 짧을 경우 사람이 아닌 조경들을 bboxing
+max_distance = 30.0  # 원점으로부터의 최대 거리
 
-min_height = 0.8   # Z값 차이의 최소값
-max_height = 1.85   # Z값 차이의 최대값
 
-## 멀리있는 보행자들도 detection하기 위해 30 ->150
-max_distance = 150.0  # 원점으로부터의 최대 거리
+plane_normal = np.array(plane_model[:3])  # [a, b, c]
+plane_offset = plane_model[3]  # d
 
-# 1번, 2번, 3번 조건을 모두 만족하는 클러스터 필터링 및 바운딩 박스 생성
-bboxes_1234 = []
+# 도로와의 최대 허용 거리 (임계값, 필요한 경우 조정 가능)
+max_distance_from_road = 5.0  # 도로에서의 최대 거리
+
+# 바운딩 박스를 생성할 클러스터를 담는 리스트 초기화
+bboxes_1234_filtered = []
+
+# 기존 루프에서 거리 조건 추가
 for i in range(max_label + 1):
     cluster_indices = np.where(labels == i)[0]
     if min_points_in_cluster <= len(cluster_indices) <= max_points_in_cluster:
@@ -80,11 +78,17 @@ for i in range(max_label + 1):
             if min_height <= height_diff <= max_height:
                 distances = np.linalg.norm(points, axis=1)
                 if distances.max() <= max_distance:
-                    bbox = cluster_pcd.get_axis_aligned_bounding_box()
-                    bbox.color = (1, 0, 0) 
-                    bboxes_1234.append(bbox)
-# pdb.set_trace()
-print("bbox의 갯수 : ", len(bboxes_1234))
+                    
+                    # 추가된 부분: 클러스터 중심점 계산
+                    cluster_center = points.mean(axis=0)  # 클러스터 중심점
+                    # 추가된 부분: 평면과의 거리 계산
+                    distance_to_plane = np.abs(np.dot(plane_normal, cluster_center) + plane_offset) / np.linalg.norm(plane_normal)
+                    
+                    # 추가된 부분: 도로로부터의 거리 조건 확인
+                    if distance_to_plane <= max_distance_from_road:
+                        bbox = cluster_pcd.get_axis_aligned_bounding_box()
+                        bbox.color = (1, 0, 0) 
+                        bboxes_1234_filtered.append(bbox)
 
 # 포인트 클라우드 및 바운딩 박스를 시각화하는 함수
 def visualize_with_bounding_boxes(pcd, bounding_boxes, window_name="Filtered Clusters and Bounding Boxes", point_size=1.0):
@@ -97,5 +101,6 @@ def visualize_with_bounding_boxes(pcd, bounding_boxes, window_name="Filtered Clu
     vis.run()
     vis.destroy_window()
 
-# 시각화 (포인트 크기를 원하는 크기로 조절 가능)
-visualize_with_bounding_boxes(final_point, bboxes_1234, point_size=2.0)
+
+# 추가된 부분: 새로운 바운딩 박스를 시각화 함수에 전달
+visualize_with_bounding_boxes(final_point, bboxes_1234_filtered, point_size=2.0)
