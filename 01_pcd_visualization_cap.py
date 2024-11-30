@@ -11,9 +11,12 @@ import os
 # pcd_folder = "test_data"
 # output_folder = "test_data/captured_images"
 # output_video_path = "test_data/output_video.mp4"
-pcd_folder = "todo_data/07_straight_walk/pcd"  # PCD 파일이 저장된 폴더
-output_folder = "todo_data/07_straight_walk/captured_images"  # 이미지를 저장할 폴더
-video_output_path = "todo_data/07_straight_walk/output_video.mp4"  # 생성될 영상 경로
+pcd_folder = "todo_data/03_straight_crawl/pcd"  # PCD 파일이 저장된 폴더
+output_folder = "todo_data/03_straight_crawl/captured_images"  # 이미지를 저장할 폴더
+video_output_path = "todo_data/03_straight_crawl/output_video.mp4"  # 생성될 영상 경로
+# pcd_folder = "combined"
+# output_folder = "combined/captured_images"
+# output_video_path = "combined/output_video.mp4"
 
 # 출력 폴더 생성
 if not os.path.exists(output_folder):
@@ -31,10 +34,10 @@ def get_common_camera_parameters():
 # def load_and_visualize_pcd(file_path, point_size=1.0):
 # def load_and_visualize_pcd(file_path, point_size=1.0, capture_image=False, output_image_path=None):
 # def load_and_capture_pcd_image(file_path, point_size=1.0, output_image_path=None):
-def load_and_capture_pcd_image(file_path, point_size=1.0, output_image_path=None, lookat=None, front=None, up=None, zoom=None):
+def load_and_capture_pcd_image(pcd, bboxes, point_size=1.0, output_image_path=None, lookat=None, front=None, up=None, zoom=None):
     # pcd 파일 로드
-    pcd = o3d.io.read_point_cloud(file_path)
-    print(f"Point cloud has {len(pcd.points)} points.")
+    # pcd = o3d.io.read_point_cloud(file_path)
+    # print(f"Point cloud has {len(pcd.points)} points.")
 
     # 동적으로 카메라 파라미터 설정
     bounding_box = pcd.get_axis_aligned_bounding_box()
@@ -49,7 +52,7 @@ def load_and_capture_pcd_image(file_path, point_size=1.0, output_image_path=None
     # R_z = pcd.get_rotation_matrix_from_axis_angle(np.array([0, 0, np.deg2rad(20)]))
     # pcd.rotate(R_z, center=bbox_center)
 
-    R_y = pcd.get_rotation_matrix_from_axis_angle(np.array([0, 0, np.deg2rad(5)]))
+    R_y = pcd.get_rotation_matrix_from_axis_angle(np.array([0, 0, np.deg2rad(10)]))
     pcd.rotate(R_y, center=bbox_center)
 
     # PCD를 zx 평면 기준으로 시계방향으로 5도 회전
@@ -64,8 +67,12 @@ def load_and_capture_pcd_image(file_path, point_size=1.0, output_image_path=None
     # 시각화 설정
     vis = o3d.visualization.Visualizer()
     # vis.create_window(visible=False)
-    vis.create_window()
+    vis.create_window(visible=False, width=1920, height=1080) 
+    # vis.create_window()
     vis.add_geometry(pcd)
+
+    for bbox in bboxes:
+                vis.add_geometry(bbox)
 
     # 카메라 파라미터 동적 적용
     view_control = vis.get_view_control()
@@ -125,24 +132,71 @@ def create_video_from_images(image_paths, video_output_path, fps=30):
     video_writer.release()
     print(f"Video saved to {video_output_path}")
 
+def preprocess_and_generate_bounding_boxes(pcd):
+    """
+    PCD 데이터에 대해 전처리를 수행하고 바운딩 박스를 생성합니다.
+    """
+    # Voxel Downsampling
+    voxel_size = 0.2
+    downsample_pcd = pcd.voxel_down_sample(voxel_size=voxel_size)
+    
+    # Radius Outlier Removal (ROR)
+    cl, ind = downsample_pcd.remove_radius_outlier(nb_points=6, radius=1.2)
+    ror_pcd = downsample_pcd.select_by_index(ind)
+    
+    # RANSAC을 사용하여 평면 추정
+    plane_model, inliers = ror_pcd.segment_plane(distance_threshold=0.1,
+                                                 ransac_n=3,
+                                                 num_iterations=2000)
+    final_point = ror_pcd.select_by_index(inliers, invert=True)
+    
+    # DBSCAN 클러스터링
+    labels = np.array(final_point.cluster_dbscan(eps=0.35, min_points=10, print_progress=True))
+    max_label = labels.max()
+    colors = plt.get_cmap("tab20")(labels / (max_label + 1 if max_label > 0 else 1))
+    colors[labels < 0] = 0  # 노이즈는 검정색
+    final_point.colors = o3d.utility.Vector3dVector(colors[:, :3])
+    
+    # 클러스터 필터링 및 바운딩 박스 생성
+    bboxes = []
+    for i in range(max_label + 1):
+        cluster_indices = np.where(labels == i)[0]
+        cluster_pcd = final_point.select_by_index(cluster_indices)
+        points = np.asarray(cluster_pcd.points)
+        z_values = points[:, 2]
+        
+        if 5 <= len(cluster_indices) <= 40:  # 클러스터 크기 필터링
+            z_min, z_max = z_values.min(), z_values.max()
+            if -1.5 <= z_min <= 2.5 and 0.8 <= (z_max - z_min) <= 1.85:
+                distances = np.linalg.norm(points, axis=1)
+                if distances.max() <= 150.0:
+                    bbox = cluster_pcd.get_axis_aligned_bounding_box()
+                    bbox.color = (1, 0, 0)
+                    bboxes.append(bbox)
+    return final_point, bboxes
+
 # 공통 카메라 파라미터 설정
 lookat, front, up, zoom = get_common_camera_parameters()
 
 image_paths = []
+file_count = 0
 for file_name in os.listdir(pcd_folder):
-    if file_name.endswith(".pcd"):
+    # if file_name.endswith(".pcd"):
+    if file_name.endswith(".pcd") and file_count < 100:
         file_path = os.path.join(pcd_folder, file_name)
         output_image_path = os.path.join(output_folder, f"{os.path.splitext(file_name)[0]}.png")
         # load_and_visualize_pcd(file_path, point_size=0.5, capture_image=True, output_image_path=output_image_path)
         # load_and_capture_pcd_image(file_path, point_size=0.5, output_image_path=output_image_path)
-        load_and_capture_pcd_image(file_path, point_size=0.5, output_image_path=output_image_path, lookat=lookat, front=front, up=up, zoom=zoom)
-        load_and_inspect_pcd(file_path)
+        pcd = o3d.io.read_point_cloud(file_path)
+        prepro_pcd, bboxes = preprocess_and_generate_bounding_boxes(pcd)
+        load_and_capture_pcd_image(prepro_pcd, bboxes, point_size=0.5, output_image_path=output_image_path, lookat=lookat, front=front, up=up, zoom=zoom)
+        # load_and_inspect_pcd(file_path)
         image_paths.append(output_image_path)
-
+        file_count += 1
 
 # # pcd 시각화 및 이미지 캡처 테스트
 # load_and_visualize_pcd(file_path, point_size=0.5, capture_image=True, output_image_path=output_image_path)
 # # load_and_visualize_pcd(file_path, point_size=0.5)
 # load_and_inspect_pcd(file_path)
 # image_paths = [output_image_path]  # 여기서는 한 장의 이미지로 테스트, 여러 이미지가 있다면 리스트에 추가
-create_video_from_images(image_paths, output_video_path, fps=30)
+create_video_from_images(image_paths, video_output_path, fps=10)
